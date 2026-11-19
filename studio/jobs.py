@@ -189,10 +189,33 @@ def save(job):
         tmp.replace(d / "job.json")
 
 
+class Stopped(Exception):
+    """The person pressed Stop on this video (added by Ahmad Dev)."""
+
+
 def _set(job, **kw):
+    # Every step of a video reports its progress through here, so this is where a Stop takes effect: the next
+    # progress update of the stopped video ends its work (a status change, made while stopping, still goes through).
+    if job.get("stopped") and "status" not in kw:
+        raise Stopped()
     with _lock:
         job.update(kw)
     save(job)
+
+
+def stop(jid) -> bool:
+    """Stop a video that is waiting or being worked on. Clips already made are kept (added by Ahmad Dev)."""
+    job = _jobs.get(jid)
+    if not job or job.get("status") not in ("queued", "running"):
+        return False
+    with _lock:
+        job["stopped"] = True
+        if job["status"] == "queued":       # not started yet: it is finished at once, and skipped when its turn comes
+            job.update(status="error", stage="Stopped", error="Stopped by you.")
+        else:
+            job["stage"] = "Stopping..."
+    save(job)
+    return True
 
 
 def _remap(path, folder: Path):
@@ -349,6 +372,8 @@ def delete(jid):
 
 
 def request_render(jid, cid, changes: dict):
+    if (_jobs.get(jid) or {}).get("stopped"):
+        _jobs[jid].pop("stopped", None)
     job = _jobs[jid]
     clip = next(c for c in job["clips"] if c["id"] == cid)
     new = dict(clip)
@@ -559,6 +584,8 @@ def _facecam(job) -> list | None:
 
 
 def _run_job(job):
+    if job.get("stopped"):
+        raise Stopped()
     import math
     from concurrent.futures import ThreadPoolExecutor
     d = Path(job["dir"])
@@ -657,6 +684,8 @@ def _run_job(job):
     began = {}      # clip id -> when work on it started
 
     def make(clip, words_now):
+        if job.get("stopped"):
+            return
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
@@ -838,11 +867,17 @@ def _worker(quick_only=False):
         except Exception as e:  # noqa: BLE001
             (Path(job["dir"]) / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
             if kind == "job":
+                stopped = isinstance(e, Stopped) or job.get("stopped")
                 for c in job["clips"]:
                     if c.get("status") in ("queued", "rendering"):
-                        c.update(status="error", error="The video stopped before this clip was made.")
-                _set(job, status="error", error=safe.friendly(e), stage="Stopped")
-                creators.log(job["creator"], f"Video failed: {safe.friendly(e)[:200]}")
+                        c.update(status="error", error="Stopped before this clip was made." if stopped else
+                                 "The video stopped before this clip was made.")
+                if stopped:
+                    _set(job, status="error", error="Stopped by you.", stage="Stopped")
+                    creators.log(job["creator"], f"Video stopped: {job.get('title') or ''}")
+                else:
+                    _set(job, status="error", error=safe.friendly(e), stage="Stopped")
+                    creators.log(job["creator"], f"Video failed: {safe.friendly(e)[:200]}")
         finally:
             ctx._uid.reset(token)
             if kind == "job":

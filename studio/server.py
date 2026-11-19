@@ -944,6 +944,17 @@ def rerender(jid: str, cid: str, body: dict = Body(...)):
     return jobs.public(job)
 
 
+@app.post("/api/jobs/{jid}/stop")
+def stop_job(jid: str):
+    """Stop a video that is waiting or being clipped (added by Ahmad Dev). Clips already made are kept."""
+    job = _job_or_404(jid)
+    if job.get("kind") == "live" or jid in live.SESSIONS:
+        raise HTTPException(409, "This is a live recording: use Stop recording on the creator's page.")
+    if not jobs.stop(jid):
+        raise HTTPException(409, "This video is not being worked on.")
+    return {"ok": True}
+
+
 @app.delete("/api/jobs/{jid}")
 def delete_job(jid: str):
     job = _job_or_404(jid)
