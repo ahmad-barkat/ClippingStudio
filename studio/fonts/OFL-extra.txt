@@ -1,0 +1,3 @@
+The fonts named <family>-<weight>.ttf in this folder (anton, archivo, cabin-sketch, dm-sans, fraunces, fredoka,
+inter, inter-tight, kalam, noto-sans-devanagari) are open-source Google Fonts under the SIL Open Font License 1.1
+(https://openfontlicense.org). Added by Ahmad Dev for the extra caption looks.
