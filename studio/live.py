@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
+from . import ai, alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
 
 # ":username!user@host PRIVMSG #channel :the message"
 _NICK = re.compile(r"(?m)^:([A-Za-z0-9_]{2,25})!")
@@ -455,8 +455,10 @@ class Session:
             now = self.t_done
             ws = max(0.0, now - max(every, 3) * 60 - 90)  # each check overlaps the last by 90 s, so nothing falls between
         self.last_check = self.t_done
+        if not ai.ready():            # no AI set up: the free local judge clips on its own (added by Ahmad Dev)
+            return self._local_check(ws, now, window, why)
         win = [w for w in self.words if ws <= w["s"] <= now]
-        recent = [c for c in self.job["clips"] if c.get("score", 0) > 0 and time.time() - c.get("made_at", 0) < 3600]
+        recent =[c for c in self.job["clips"] if c.get("score", 0) > 0 and time.time() - c.get("made_at", 0) < 3600]
         last_clip = max((c.get("made_at", 0) for c in self.job["clips"]), default=self.started_at)
         must = st["must_clip_min"] > 0 and time.time() - last_clip >= st["must_clip_min"] * 60
         verdict = {"t": round(now), "transcript": None, "reaction": None, "trigger": why}
@@ -474,7 +476,8 @@ class Session:
                                                 timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
         except Exception as e:  # noqa: BLE001
             self.job["ai"]["last_error"] = str(e)[-200:]
-            return self._verdict(verdict, "AI error: " + str(e)[-80:])
+            self._verdict(verdict, "AI error: " + str(e)[-80:] + " (the free judge decides instead)")
+            return self._local_check(ws, now, window, why)
         self.checks += 1
         self.tokens += tok
         keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
@@ -521,6 +524,30 @@ class Session:
             must = False
             if added >= (1 if every <= 2 else 2):
                 break
+
+    def _local_check(self, ws, now, window=None, why=None):
+        """Fully automatic clipping without AI (added by Ahmad Dev): loudness peaks and reaction words pick the
+        moment, sentence edges make the arc. A jump or a "clip" call always gets a clip; the regular check only
+        when something stood out."""
+        from . import live_auto
+        st = self.settings
+        verdict = {"t": round(now), "transcript": None, "reaction": None, "trigger": why}
+        recent = [c for c in self.job["clips"] if c.get("score", 0) > 0 and time.time() - c.get("made_at", 0) < 3600]
+        if len(recent) >= st["live_per_hour"]:
+            self.skipped += 1
+            return self._verdict(verdict, f"Skipped: {st['live_per_hour']} clips this hour already")
+        with self.lock:
+            words, db = list(self.words), list(self.db)
+        peak = (window[0] + self.AUTO_BEFORE) if window and why and why.startswith("Jump") else None
+        c = live_auto.pick(words, db, ws, now, st["min_len"], st["max_len"], peak=peak, need_signal=not window)
+        if not c:
+            self.skipped += 1
+            return self._verdict(verdict, "Free judge: nothing stood out")
+        if any(abs(c["start"] - k["start"]) < st["min_gap_min"] * 60 for k in self.job["clips"]):
+            return self._verdict(verdict, "Too close to the last clip")
+        c["reason"] = f"Picked automatically: {why or 'loud moment and reaction words'}."
+        self._add_clip(c)
+        self._verdict(verdict, "Clipped by the free judge")
 
     def _verdict(self, v, result):
         self.verdicts.append(dict(v, result=result))
