@@ -722,6 +722,25 @@ def create_from_link(body: dict = Body(...)):
     creator = str(body.get("creator") or "") or None
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
+    # A live stream pasted in the link box (added by Ahmad Dev): instead of refusing it, record it the way the
+    # creator page does, under the chosen creator or one named after the streamer, and clip it while it runs.
+    try:
+        seen = media._PREVIEWS.get(url) or media.preview(url)
+    except Exception:  # noqa: BLE001 - the video job below reports any problem with the link
+        seen = None
+    if seen and seen.get("is_live"):
+        c = creators.get(creator) if creator else None
+        if not c:
+            name = (seen.get("uploader") or "Live stream").strip()[:60]
+            c = next((x for x in creators.all_creators() if x.get("name", "").lower() == name.lower()), None)
+            if not c:
+                if len(creators.all_creators()) >= config.MAX_CREATORS:
+                    raise HTTPException(400, f"This server allows {config.MAX_CREATORS} creators per account.")
+                c = creators.create({"name": name})
+        try:
+            return jobs.public(live.start_session(c, url))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     try:
         with _create_lock:
             _job_slots()
